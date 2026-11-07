@@ -1,0 +1,76 @@
+--- a/src/accessibility.rs
++++ b/src/accessibility.rs
+@@ -6,7 +6,7 @@
+ use std::ptr::NonNull;
+
+ use objc2_application_services::{AXError, AXUIElement};
+-use objc2_core_foundation::{CFArray, CFIndex, CFRetained, CFString, CFType, Type};
++use objc2_core_foundation::{CFArray, CFBoolean, CFIndex, CFRetained, CFString, CFType, Type};
+ 
+ pub use objc2_application_services::AXIsProcessTrusted;
+ 
+@@ -159,6 +159,8 @@
+         None => return Vec::new(),
+     };
+     let mut result = cf_type_as_ax_elements(&value);
++    // Some apps temporarily expose themselves as children while their AX tree initializes.
++    result.retain(|child| !is_same_element(element, child));
+ 
+     // AXExtrasMenuBar is a standalone attribute on AXApplication, not
+     // included in AXChildren.  We skip the AXRole guard and just attempt
+@@ -492,6 +494,42 @@
+     }
+ }
+ 
++/// Enable Chromium/Electron trees before attempting to walk them. Native apps are untouched.
++fn prepare_web_accessibility(pid: i32, element: &AXUIElement) {
++    use objc2_app_kit::NSRunningApplication;
++    let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
++        return;
++    };
++    let bundle = app.bundleIdentifier().map(|value| value.to_string().to_lowercase()).unwrap_or_default();
++    let browser = [
++        "com.brave.browser", "com.google.chrome", "org.chromium.chromium",
++        "com.microsoft.edgemac", "com.vivaldi.vivaldi", "com.operasoftware.opera",
++        "company.thebrowser.browser", "company.thebrowser.dia",
++    ].iter().any(|prefix| bundle.starts_with(prefix));
++    let electron = app.bundleURL().and_then(|url| url.path()).is_some_and(|path| {
++        std::path::Path::new(&path.to_string())
++            .join("Contents/Frameworks/Electron Framework.framework").is_dir()
++    });
++    if !browser && !electron {
++        return;
++    }
++    let yes = CFBoolean::new(true);
++    let attributes = ["AXManualAccessibility", "AXEnhancedUserInterface"];
++    let already_enabled = attributes.iter().any(|attribute| {
++        attr_value(element, attribute).is_some_and(|value| {
++            objc2_core_foundation::CFEqual(Some(value.as_ref()), Some(yes.as_ref()))
++        })
++    });
++    // Chromium can act on the request even while returning an unsupported-attribute error.
++    for attribute in attributes {
++        set_attr_value(element, attribute, yes);
++    }
++    if !already_enabled {
++        // The browser publishes its renderer tree asynchronously over IPC.
++        std::thread::sleep(std::time::Duration::from_millis(150));
++    }
++}
++
+ // ---------------------------------------------------------------------------
+ // AXNode — ergonomic wrapper
+ // ---------------------------------------------------------------------------
+@@ -502,7 +540,11 @@
+ impl AXNode {
+     /// Create a node for an application by PID.
+     pub fn app(pid: i32) -> Self {
+-        Self(unsafe { AXUIElement::new_application(pid) })
++        let node = Self(unsafe { AXUIElement::new_application(pid) });
++        if is_trusted() {
++            prepare_web_accessibility(pid, &node.0);
++        }
++        node
+     }
+ 
+     /// Create a node from a retained element.

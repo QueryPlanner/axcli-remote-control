@@ -1,0 +1,13 @@
+.venv/
+.cache/
+.tools/
+.secrets/
+__pycache__/
+*.log
+dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+api_token
+*.png
